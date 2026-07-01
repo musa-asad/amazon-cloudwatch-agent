@@ -663,9 +663,15 @@ func TestResendWouldStopAfterExhaustedRetries(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	logLines := logSink.Lines()
-	lastLine := logLines[len(logLines)-1]
 	expected := fmt.Sprintf("All %v retries to G/S failed for PutLogEvents, request dropped.", cnt.Load()-1)
-	require.True(t, strings.HasSuffix(lastLine, expected), fmt.Sprintf("Expecting error log to end with request dropped, but received '%s' in the log", logSink.String()))
+	dropped := false
+	for _, line := range logLines {
+		if strings.HasSuffix(line, expected) {
+			dropped = true
+			break
+		}
+	}
+	require.True(t, dropped, fmt.Sprintf("Expecting error log to contain request dropped, but received '%s' in the log", logSink.String()))
 
 	q.Stop()
 	sender.Stop()
@@ -757,6 +763,7 @@ func TestQueueCallbackRegistration(t *testing.T) {
 			flushCh:         make(chan struct{}),
 			resetTimerCh:    make(chan struct{}, 1),
 			flushTimer:      time.NewTimer(10 * time.Millisecond),
+			flushWatchdog:   newFlushWatchdog(Target{"G", "S", util.StandardLogGroupClass, -1}, logger, 10*time.Millisecond, make(chan struct{})),
 			startNonBlockCh: make(chan struct{}),
 			wg:              &wg,
 		}
@@ -799,6 +806,7 @@ func TestQueueCallbackRegistration(t *testing.T) {
 			flushCh:         make(chan struct{}),
 			resetTimerCh:    make(chan struct{}, 1),
 			flushTimer:      time.NewTimer(10 * time.Millisecond),
+			flushWatchdog:   newFlushWatchdog(Target{"G", "S", util.StandardLogGroupClass, -1}, logger, 10*time.Millisecond, make(chan struct{})),
 			startNonBlockCh: make(chan struct{}),
 			wg:              &wg,
 		}

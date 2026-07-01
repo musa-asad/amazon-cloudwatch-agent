@@ -31,13 +31,14 @@ type queue struct {
 	eventsCh            chan logs.LogEvent
 	nonBlockingEventsCh chan logs.LogEvent
 
-	flushCh      chan struct{}
-	resetTimerCh chan struct{}
-	flushTimer   *time.Timer
-	flushTimeout atomic.Value
-	stopCh       chan struct{}
-	stopped      bool
-	lastSentTime atomic.Value
+	flushCh       chan struct{}
+	resetTimerCh  chan struct{}
+	flushTimer    *time.Timer
+	flushTimeout  atomic.Value
+	flushWatchdog *flushWatchdog
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	lastSentTime  atomic.Value
 
 	initNonBlockingChOnce sync.Once
 	startNonBlockCh       chan struct{}
@@ -54,6 +55,7 @@ func newQueue(
 	sender Sender,
 	wg *sync.WaitGroup,
 ) Queue {
+	stopCh := make(chan struct{})
 	q := &queue{
 		target:          target,
 		logger:          logger,
@@ -64,7 +66,8 @@ func newQueue(
 		flushCh:         make(chan struct{}),
 		resetTimerCh:    make(chan struct{}, 1),
 		flushTimer:      time.NewTimer(flushTimeout),
-		stopCh:          make(chan struct{}),
+		flushWatchdog:   newFlushWatchdog(target, logger, flushTimeout, stopCh),
+		stopCh:          stopCh,
 		startNonBlockCh: make(chan struct{}),
 		wg:              wg,
 	}
@@ -110,11 +113,9 @@ func (q *queue) AddEventNonBlocking(e logs.LogEvent) {
 
 // Stop stops all goroutines associated with this queue instance.
 func (q *queue) Stop() {
-	if q.stopped {
-		return
-	}
-	close(q.stopCh)
-	q.stopped = true
+	q.stopOnce.Do(func() {
+		close(q.stopCh)
+	})
 }
 
 // start is the main loop for processing events and managing the queue.
@@ -124,6 +125,7 @@ func (q *queue) start() {
 
 	go q.merge(mergeChan)
 	go q.manageFlushTimer()
+	go q.flushWatchdog.run()
 
 	for {
 		select {
@@ -215,19 +217,24 @@ func (q *queue) manageFlushTimer() {
 }
 
 // stopFlushTimer stops the timer and attempts to drain it.
-func (q *queue) stopFlushTimer() {
-	if !q.flushTimer.Stop() {
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
 		select {
-		case <-q.flushTimer.C:
+		case <-t.C:
 		default:
 		}
 	}
+}
+
+func (q *queue) stopFlushTimer() {
+	stopTimer(q.flushTimer)
 }
 
 // resetFlushTimer sends a reset timer request if there isn't already one pending.
 func (q *queue) resetFlushTimer() {
 	select {
 	case q.resetTimerCh <- struct{}{}:
+		q.flushWatchdog.heartbeat()
 	default:
 	}
 }
